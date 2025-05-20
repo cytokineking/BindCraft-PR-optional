@@ -234,3 +234,182 @@ def calculate_percentages(total, helix, sheet):
     loop_percentage = round(((total - helix - sheet) / total) * 100,2) if total > 0 else 0
 
     return helix_percentage, sheet_percentage, loop_percentage
+
+
+# PyRosetta-free implementation of align_pdbs using Biopython
+def biopython_align_pdbs(reference_pdb, align_pdb, reference_chain_id, align_chain_id):
+    """
+    Aligns the align_pdb to the reference_pdb using Biopython and overwrites
+    the align_pdb file with the aligned structure.
+    
+    Args:
+        reference_pdb: Path to the reference PDB file
+        align_pdb: Path to the PDB file to be aligned
+        reference_chain_id: Chain ID of the reference structure to use for alignment
+        align_chain_id: Chain ID of the structure to be aligned
+    """
+    # Parse the PDB files
+    parser = PDBParser(QUIET=True)
+    reference_structure = parser.get_structure('reference', reference_pdb)
+    align_structure = parser.get_structure('align', align_pdb)
+    
+    # If the chain IDs contain commas, split them and only take the first value
+    reference_chain_id = reference_chain_id.split(',')[0]
+    align_chain_id = align_chain_id.split(',')[0]
+    
+    # Get the specified chains
+    reference_chain = reference_structure[0][reference_chain_id]
+    align_chain = align_structure[0][align_chain_id]
+    
+    # Extract CA atoms for alignment
+    reference_atoms = []
+    align_atoms = []
+    
+    for residue in reference_chain:
+        if is_aa(residue) and 'CA' in residue:
+            reference_atoms.append(residue['CA'])
+    
+    for residue in align_chain:
+        if is_aa(residue) and 'CA' in residue:
+            align_atoms.append(residue['CA'])
+
+    # Use min length to ensure comparable sets
+    min_length = min(len(reference_atoms), len(align_atoms))
+    reference_atoms = reference_atoms[:min_length]
+    align_atoms = align_atoms[:min_length]
+    
+    # Align structures
+    sup = Superimposer()
+    sup.set_atoms(reference_atoms, align_atoms)
+    
+    # Apply rotation/translation to all atoms in the structure
+    sup.apply(align_structure.get_atoms())
+    
+    # Save the aligned structure
+    io = PDBIO()
+    io.set_structure(align_structure)
+    io.save(align_pdb)
+    
+    # Clean the aligned PDB to maintain consistency
+    from .generic_utils import clean_pdb
+    clean_pdb(align_pdb)
+
+
+# PyRosetta-free implementation of unaligned_rmsd using Biopython
+def biopython_unaligned_rmsd(reference_pdb, align_pdb, reference_chain_id, align_chain_id):
+    """
+    Calculate RMSD between two PDB structures without aligning them first.
+    
+    Args:
+        reference_pdb: Path to the reference PDB file
+        align_pdb: Path to the PDB file to compare
+        reference_chain_id: Chain ID of the reference structure
+        align_chain_id: Chain ID of the structure to compare
+
+    Returns:
+        float: RMSD value
+    """
+    # Parse the PDB files
+    parser = PDBParser(QUIET=True)
+    reference_structure = parser.get_structure('reference', reference_pdb)
+    align_structure = parser.get_structure('align', align_pdb)
+    
+    # If the chain IDs contain commas, split them and only take the first value
+    reference_chain_id = reference_chain_id.split(',')[0]
+    align_chain_id = align_chain_id.split(',')[0]
+    
+    # Get the specified chains
+    reference_chain = reference_structure[0][reference_chain_id]
+    align_chain = align_structure[0][align_chain_id]
+    
+    # Extract CA atoms for RMSD calculation
+    reference_atoms = []
+    align_atoms = []
+    
+    for residue in reference_chain:
+        if is_aa(residue) and 'CA' in residue:
+            reference_atoms.append(residue['CA'])
+    
+    for residue in align_chain:
+        if is_aa(residue) and 'CA' in residue:
+            align_atoms.append(residue['CA'])
+
+    # Use min length to ensure comparable sets
+    min_length = min(len(reference_atoms), len(align_atoms))
+    reference_atoms = reference_atoms[:min_length]
+    align_atoms = align_atoms[:min_length]
+    
+    # Calculate RMSD without performing alignment
+    squared_sum = 0.0
+    for ref_atom, align_atom in zip(reference_atoms, align_atoms):
+        squared_sum += sum((ref_atom.coord - align_atom.coord)**2)
+    
+    rmsd = math.sqrt(squared_sum / len(reference_atoms))
+    
+    return round(rmsd, 2)
+
+def biopython_align_all_ca(reference_pdb_path: str, pdb_to_align_path: str):
+    """
+    Aligns the pdb_to_align_path to the reference_pdb_path using all C-alpha atoms
+    and overwrites the pdb_to_align_path file with the aligned structure.
+
+    Args:
+        reference_pdb_path: Path to the reference PDB file.
+        pdb_to_align_path: Path to the PDB file to be aligned. This file will be overwritten.
+    """
+    parser = PDBParser(QUIET=True)
+    try:
+        reference_structure = parser.get_structure('reference', reference_pdb_path)
+        structure_to_align = parser.get_structure('to_align', pdb_to_align_path)
+    except Exception as e:
+        print(f"Error parsing PDB files for alignment: {e}")
+        # Consider whether to raise or simply return if parsing fails
+        return
+
+    ref_atoms = []
+    align_atoms = []
+
+    # Collect CA atoms from all chains in reference structure
+    for model in reference_structure:
+        for chain in model:
+            for residue in chain:
+                if is_aa(residue, standard=True) and 'CA' in residue:
+                    ref_atoms.append(residue['CA'])
+    
+    # Collect CA atoms from all chains in structure to align
+    for model in structure_to_align:
+        for chain in model:
+            for residue in chain:
+                if is_aa(residue, standard=True) and 'CA' in residue:
+                    align_atoms.append(residue['CA'])
+
+    if not ref_atoms or not align_atoms:
+        print("Warning: No C-alpha atoms found for alignment in one or both structures. Skipping alignment.")
+        return
+
+    # Ensure an equal number of atoms are used for superimposition
+    min_len = min(len(ref_atoms), len(align_atoms))
+    if min_len == 0:
+        print("Warning: Zero common C-alpha atoms for alignment. Skipping alignment.")
+        return
+        
+    ref_atoms = ref_atoms[:min_len]
+    align_atoms = align_atoms[:min_len]
+
+    super_imposer = Superimposer()
+    super_imposer.set_atoms(ref_atoms, align_atoms)
+    
+    # Apply the rotation and translation to all atoms in the structure_to_align
+    super_imposer.apply(structure_to_align.get_atoms())
+
+    # Save the aligned structure, overwriting the original file
+    io = PDBIO()
+    io.set_structure(structure_to_align)
+    try:
+        io.save(pdb_to_align_path)
+        # print(f"Successfully aligned {pdb_to_align_path} to {reference_pdb_path} based on all CA atoms.")
+        # Clean the PDB after alignment
+        from .generic_utils import clean_pdb # Local import to avoid circular dependency issues at module load time
+        clean_pdb(pdb_to_align_path)
+    except Exception as e:
+        print(f"Error saving aligned PDB file {pdb_to_align_path}: {e}")

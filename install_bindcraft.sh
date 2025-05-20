@@ -4,10 +4,11 @@
 # Default value for pkg_manager
 pkg_manager='conda'
 cuda=''
+install_pyrosetta=true
 
 # Define the short and long options
-OPTIONS=p:c:
-LONGOPTIONS=pkg_manager:,cuda:
+OPTIONS=p:c:n
+LONGOPTIONS=pkg_manager:,cuda:,no-pyrosetta
 
 # Parse the command-line options
 PARSED=$(getopt --options=$OPTIONS --longoptions=$LONGOPTIONS --name "$0" -- "$@")
@@ -24,6 +25,10 @@ while true; do
       cuda="$2"
       shift 2
       ;;
+    -n|--no-pyrosetta)
+      install_pyrosetta=false
+      shift
+      ;;
     --)
       shift
       break
@@ -38,6 +43,7 @@ done
 # Example usage of the parsed variables
 echo -e "Package manager: $pkg_manager"
 echo -e "CUDA: $cuda"
+echo -e "Install PyRosetta: $install_pyrosetta"
 
 ############################################################################################################
 ############################################################################################################
@@ -61,15 +67,34 @@ source ${CONDA_BASE}/bin/activate ${CONDA_BASE}/envs/BindCraft || { echo -e "Err
 echo -e "BindCraft environment activated at ${CONDA_BASE}/envs/BindCraft"
 
 # install required conda packages
-echo -e "Instaling conda requirements\n"
-if [ -n "$cuda" ]; then
-    CONDA_OVERRIDE_CUDA="$cuda" $pkg_manager install pip pandas matplotlib numpy"<2.0.0" biopython scipy pdbfixer seaborn libgfortran5 tqdm jupyter ffmpeg pyrosetta fsspec py3dmol chex dm-haiku flax"<0.10.0" dm-tree joblib ml-collections immutabledict optax jaxlib=*=*cuda* jax cuda-nvcc cudnn -c conda-forge -c nvidia  --channel https://conda.graylab.jhu.edu -y || { echo -e "Error: Failed to install conda packages."; exit 1; }
+echo -e "Installing conda requirements\n"
+
+# Base packages (needed regardless of PyRosetta)
+BASE_PACKAGES="pip pandas matplotlib numpy<2.0.0 biopython scipy pdbfixer openmm seaborn libgfortran5 tqdm jupyter ffmpeg fsspec py3dmol chex dm-haiku flax<0.10.0 dm-tree joblib ml-collections immutabledict optax"
+
+# Install packages with or without PyRosetta
+if [ "$install_pyrosetta" = true ]; then
+    echo -e "Installing with PyRosetta\n"
+    if [ -n "$cuda" ]; then
+        CONDA_OVERRIDE_CUDA="$cuda" $pkg_manager install $BASE_PACKAGES pyrosetta jaxlib=*=*cuda* jax cuda-nvcc cudnn -c conda-forge -c nvidia --channel https://conda.graylab.jhu.edu -y || { echo -e "Error: Failed to install conda packages with PyRosetta."; exit 1; }
+    else
+        $pkg_manager install $BASE_PACKAGES pyrosetta jaxlib jax cuda-nvcc cudnn -c conda-forge -c nvidia --channel https://conda.graylab.jhu.edu -y || { echo -e "Error: Failed to install conda packages with PyRosetta."; exit 1; }
+    fi
 else
-    $pkg_manager install pip pandas matplotlib numpy"<2.0.0" biopython scipy pdbfixer seaborn libgfortran5 tqdm jupyter ffmpeg pyrosetta fsspec py3dmol chex dm-haiku flax"<0.10.0" dm-tree joblib ml-collections immutabledict optax jaxlib jax cuda-nvcc cudnn -c conda-forge -c nvidia  --channel https://conda.graylab.jhu.edu -y || { echo -e "Error: Failed to install conda packages."; exit 1; }
+    echo -e "Installing without PyRosetta\n"
+    if [ -n "$cuda" ]; then
+        CONDA_OVERRIDE_CUDA="$cuda" $pkg_manager install $BASE_PACKAGES jaxlib=*=*cuda* jax cuda-nvcc cudnn -c conda-forge -c nvidia -y || { echo -e "Error: Failed to install conda packages without PyRosetta."; exit 1; }
+    else
+        $pkg_manager install $BASE_PACKAGES jaxlib jax cuda-nvcc cudnn -c conda-forge -c nvidia -y || { echo -e "Error: Failed to install conda packages without PyRosetta."; exit 1; }
+    fi
 fi
 
-# make sure all required packages were installed
-required_packages=(pip pandas libgfortran5 matplotlib numpy biopython scipy pdbfixer seaborn tqdm jupyter ffmpeg pyrosetta fsspec py3dmol chex dm-haiku dm-tree joblib ml-collections immutabledict optax jaxlib jax cuda-nvcc cudnn)
+# Define required packages based on installation mode
+if [ "$install_pyrosetta" = true ]; then
+    required_packages=(pip pandas libgfortran5 matplotlib numpy biopython scipy pdbfixer openmm seaborn tqdm jupyter ffmpeg pyrosetta fsspec py3dmol chex dm-haiku dm-tree joblib ml-collections immutabledict optax jaxlib jax cuda-nvcc cudnn)
+else
+    required_packages=(pip pandas libgfortran5 matplotlib numpy biopython scipy pdbfixer openmm seaborn tqdm jupyter ffmpeg fsspec py3dmol chex dm-haiku dm-tree joblib ml-collections immutabledict optax jaxlib jax cuda-nvcc cudnn)
+fi
 missing_packages=()
 
 # Check each package
@@ -110,7 +135,13 @@ rm "${params_file}" || { echo -e "Warning: Failed to remove AlphaFold2 weights a
 # chmod executables
 echo -e "Changing permissions for executables\n"
 chmod +x "${install_dir}/functions/dssp" || { echo -e "Error: Failed to chmod dssp"; exit 1; }
-chmod +x "${install_dir}/functions/DAlphaBall.gcc" || { echo -e "Error: Failed to chmod DAlphaBall.gcc"; exit 1; }
+
+# Only setup DAlphaBall.gcc if installing PyRosetta
+if [ "$install_pyrosetta" = true ]; then
+    chmod +x "${install_dir}/functions/DAlphaBall.gcc" || { echo -e "Error: Failed to chmod DAlphaBall.gcc"; exit 1; }
+else
+    echo -e "Skipping DAlphaBall.gcc setup as PyRosetta is not being installed"
+fi
 
 # finish
 conda deactivate

@@ -135,7 +135,7 @@ def check_n_trajectories(design_paths, advanced_settings):
 
 # Check if we have required number of accepted targets, rank them, and analyse sequence and structure properties
 def check_accepted_designs(design_paths, mpnn_csv, final_labels, final_csv, advanced_settings, target_settings, design_labels):
-    accepted_binders = [f for f in os.listdir(design_paths["Accepted"]) if f.endswith('.pdb')]
+    accepted_binders = [f for f in os.listdir(design_paths["Accepted"]) if f.endswith('.pdb') and os.path.isfile(os.path.join(design_paths["Accepted"], f))]
 
     if len(accepted_binders) >= target_settings["number_of_final_designs"]:
         print(f"Target number {str(len(accepted_binders))} of designs reached! Reranking...")

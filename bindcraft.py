@@ -3,6 +3,7 @@
 ####################################
 ### Import dependencies
 from functions import *
+from functions.generic_utils import insert_data # Explicit import for insert_data
 
 # Check if JAX-capable GPU is available, otherwise exit
 check_jax_gpu()
@@ -17,6 +18,8 @@ parser.add_argument('--filters', '-f', type=str, default='./settings_filters/def
                     help='Path to the filters.json file used to filter design. If not provided, default will be used.')
 parser.add_argument('--advanced', '-a', type=str, default='./settings_advanced/default_4stage_multimer.json',
                     help='Path to the advanced.json file with additional design settings. If not provided, default will be used.')
+parser.add_argument('--no-pyrosetta', action='store_true',
+                    help='Run without PyRosetta (skips relaxation and PyRosetta-based scoring)')
 
 args = parser.parse_args()
 
@@ -53,11 +56,46 @@ create_dataframe(mpnn_csv, design_labels)
 create_dataframe(final_csv, final_labels)
 generate_filter_pass_csv(failure_csv, args.filters)
 
+### Define and initialize rejected_mpnn_full_stats.csv
+# Ensure failure_csv exists and has headers to read its column structure
+if not os.path.exists(failure_csv):
+    # This should ideally not happen if generate_filter_pass_csv worked, create an empty one if it's missing.
+    temp_failure_df_for_cols = pd.DataFrame()
+    print(f"Warning: {failure_csv} was not found after generate_filter_pass_csv. rejected_mpnn_full_stats.csv might have incorrect filter columns.")
+else:
+    try:
+        temp_failure_df_for_cols = pd.read_csv(failure_csv)
+    except pd.errors.EmptyDataError:
+        # If failure_csv is empty we need to get column names from how generate_filter_pass_csv would create them.
+        print(f"Warning: {failure_csv} is empty. rejected_mpnn_full_stats.csv may lack detailed filter columns initially if no filters are defined or an issue occurred.")
+        temp_failure_df_for_cols = pd.DataFrame() # Fallback- we don't want BindCraft to crash over this
+
+filter_column_names_for_rejected_log = temp_failure_df_for_cols.columns.tolist()
+del temp_failure_df_for_cols # Free memory
+
+rejected_stats_columns = ['Design', 'Sequence'] + filter_column_names_for_rejected_log
+rejected_mpnn_full_stats_csv = os.path.join(target_settings["design_path"], 'rejected_mpnn_full_stats.csv')
+create_dataframe(rejected_mpnn_full_stats_csv, rejected_stats_columns)
 ####################################
 ####################################
 ####################################
-### initialise PyRosetta
-pr.init(f'-ignore_unrecognized_res -ignore_zero_occupancy -mute all -holes:dalphaball {advanced_settings["dalphaball_path"]} -corrections::beta_nov16 true -relax:default_repeats 1')
+### initialise PyRosetta if not disabled
+use_pyrosetta = False
+
+if not args.no_pyrosetta:
+    if 'PYROSETTA_AVAILABLE' in globals() and PYROSETTA_AVAILABLE and pr is not None:
+        try:
+            pr.init(f'-ignore_unrecognized_res -ignore_zero_occupancy -mute all -holes:dalphaball {advanced_settings["dalphaball_path"]} -corrections::beta_nov16 true -relax:default_repeats 1')
+            print("PyRosetta initialized successfully.")
+            use_pyrosetta = True
+        except Exception as e:
+            print(f"Warning: PyRosetta initialization failed: {e}")
+            print("Proceeding in PyRosetta-free mode.")
+    else:
+        print("PyRosetta not available. Proceeding in PyRosetta-free mode.")
+else:
+    print("Running in PyRosetta-free mode as requested by --no-pyrosetta flag.")
+
 print(f"Running binder design for target {settings_file}")
 print(f"Design settings used: {advanced_file}")
 print(f"Filtering designs based on {filters_file}")
@@ -125,7 +163,7 @@ while True:
         if trajectory.aux["log"]["terminate"] == "":
             # Relax binder to calculate statistics
             trajectory_relaxed = os.path.join(design_paths["Trajectory/Relaxed"], design_name + ".pdb")
-            pr_relax(trajectory_pdb, trajectory_relaxed)
+            pr_relax(trajectory_pdb, trajectory_relaxed, use_pyrosetta=use_pyrosetta)
 
             # define binder chain, placeholder in case multi-chain parsing in ColabDesign gets changed
             binder_chain = "B"
@@ -138,7 +176,7 @@ while True:
             trajectory_alpha, trajectory_beta, trajectory_loops, trajectory_alpha_interface, trajectory_beta_interface, trajectory_loops_interface, trajectory_i_plddt, trajectory_ss_plddt = calc_ss_percentage(trajectory_pdb, advanced_settings, binder_chain)
 
             # analyze interface scores for relaxed af2 trajectory
-            trajectory_interface_scores, trajectory_interface_AA, trajectory_interface_residues = score_interface(trajectory_relaxed, binder_chain)
+            trajectory_interface_scores, trajectory_interface_AA, trajectory_interface_residues = score_interface(trajectory_relaxed, binder_chain, use_pyrosetta=use_pyrosetta)
 
             # starting binder sequence
             trajectory_sequence = trajectory.get_seq(get_best=True)[0]
@@ -170,7 +208,21 @@ while True:
 
                 ### MPNN redesign of starting binder
                 mpnn_trajectories = mpnn_gen_sequence(trajectory_pdb, binder_chain, trajectory_interface_residues, advanced_settings)
-                existing_mpnn_sequences = set(pd.read_csv(mpnn_csv, usecols=['Sequence'])['Sequence'].values)
+                
+                existing_mpnn_sequences = set()
+                if os.path.exists(mpnn_csv) and os.path.getsize(mpnn_csv) > 0:
+                    try:
+                        df_mpnn = pd.read_csv(mpnn_csv, usecols=['Sequence'])
+                        if not df_mpnn.empty:
+                            existing_mpnn_sequences = set(df_mpnn['Sequence'].dropna().astype(str).values)
+                    except pd.errors.EmptyDataError:
+                        print(f"Warning: {mpnn_csv} is empty or has no columns. Starting with no existing MPNN sequences.")
+                    except KeyError:
+                        print(f"Warning: 'Sequence' column not found in {mpnn_csv}. Starting with no existing MPNN sequences.")
+                    except Exception as e:
+                        print(f"Warning: Could not read existing MPNN sequences from {mpnn_csv} due to: {e}. Starting with no existing MPNN sequences.")
+                else:
+                    print(f"Info: {mpnn_csv} does not exist or is empty. Starting with no existing MPNN sequences.")
 
                 # create set of MPNN sequences with allowed amino acid composition
                 restricted_AAs = set(aa.strip().upper() for aa in advanced_settings["omit_AAs"].split(',')) if advanced_settings["force_reject_AA"] else set()
@@ -228,15 +280,39 @@ while True:
                             save_fasta(mpnn_design_name, mpnn_sequence['seq'], design_paths)
                         
                         ### Predict mpnn redesigned binder complex using masked templates
-                        mpnn_complex_statistics, pass_af2_filters = predict_binder_complex(complex_prediction_model,
+                        mpnn_complex_statistics, pass_af2_filters, early_filter_details = predict_binder_complex(complex_prediction_model,
                                                                                         mpnn_sequence['seq'], mpnn_design_name,
                                                                                         target_settings["starting_pdb"], target_settings["chains"],
                                                                                         length, trajectory_pdb, prediction_models, advanced_settings,
-                                                                                        filters, design_paths, failure_csv)
+                                                                                        filters, design_paths, failure_csv, use_pyrosetta=use_pyrosetta)
 
-                        # if AF2 filters are not passed then skip the scoring
+                        # if AF2 filters are not passed then skip the scoring but log the failure
                         if not pass_af2_filters:
-                            print(f"Base AF2 filters not passed for {mpnn_design_name}, skipping interface scoring")
+                            print(f"Base AF2 filters not passed for {mpnn_design_name}, skipping full interface scoring.")
+
+                            # Log to rejected_mpnn_full_stats.csv for early AF2 failures
+                            rejected_data_list_for_csv = [mpnn_design_name, mpnn_sequence['seq']]
+                            
+                            failed_base_metrics_for_this_design = set()
+                            if early_filter_details: # early_filter_details is the filter_failures dict e.g. {"1_pLDDT": 1}
+                                for specific_model_failure_key in early_filter_details.keys():
+                                    parts = specific_model_failure_key.split('_')
+                                    if len(parts) > 1 and parts[0].isdigit(): # e.g. "1_pLDDT" -> "pLDDT"
+                                        base_metric_name = ''.join(parts[1:]) # Corrected: was '_'.join, should be '' to match pLDDT from pLDDT
+                                        # Special case for i_pTM, i_pAE, i_pLDDT as they already contain an underscore
+                                        if parts[1] == "i" and len(parts) > 2: # e.g. "1_i_pTM" -> "i_pTM"
+                                            base_metric_name = parts[1] + "_" + ''.join(parts[2:])
+                                        failed_base_metrics_for_this_design.add(base_metric_name)
+                                    else: # Should not happen with current predict_binder_complex failures, but good for robustness
+                                        failed_base_metrics_for_this_design.add(specific_model_failure_key)
+
+                            for base_filter_col_name_in_log_csv in filter_column_names_for_rejected_log:
+                                if base_filter_col_name_in_log_csv in failed_base_metrics_for_this_design:
+                                    rejected_data_list_for_csv.append(1)
+                                else:
+                                    rejected_data_list_for_csv.append(0)
+                            insert_data(rejected_mpnn_full_stats_csv, rejected_data_list_for_csv)
+                            
                             mpnn_n += 1
                             continue
 
@@ -251,13 +327,13 @@ while True:
                                 num_clashes_mpnn_relaxed = calculate_clash_score(mpnn_design_relaxed)
 
                                 # analyze interface scores for relaxed af2 trajectory
-                                mpnn_interface_scores, mpnn_interface_AA, mpnn_interface_residues = score_interface(mpnn_design_relaxed, binder_chain)
+                                mpnn_interface_scores, mpnn_interface_AA, mpnn_interface_residues = score_interface(mpnn_design_relaxed, binder_chain, use_pyrosetta=use_pyrosetta)
 
                                 # secondary structure content of starting trajectory binder
                                 mpnn_alpha, mpnn_beta, mpnn_loops, mpnn_alpha_interface, mpnn_beta_interface, mpnn_loops_interface, mpnn_i_plddt, mpnn_ss_plddt = calc_ss_percentage(mpnn_design_pdb, advanced_settings, binder_chain)
                                 
                                 # unaligned RMSD calculate to determine if binder is in the designed binding site
-                                rmsd_site = unaligned_rmsd(trajectory_pdb, mpnn_design_pdb, binder_chain, binder_chain)
+                                rmsd_site = unaligned_rmsd(trajectory_pdb, mpnn_design_pdb, binder_chain, binder_chain, use_pyrosetta=use_pyrosetta)
 
                                 # calculate RMSD of target compared to input PDB
                                 target_rmsd = target_pdb_rmsd(mpnn_design_pdb, target_settings["starting_pdb"], target_settings["chains"])
@@ -302,14 +378,15 @@ while True:
                         
                         ### Predict binder alone in single sequence mode
                         binder_statistics = predict_binder_alone(binder_prediction_model, mpnn_sequence['seq'], mpnn_design_name, length,
-                                                                trajectory_pdb, binder_chain, prediction_models, advanced_settings, design_paths)
+                                                                trajectory_pdb, binder_chain, prediction_models, advanced_settings, design_paths, 
+                                                                use_pyrosetta=use_pyrosetta)
 
                         # extract RMSDs of binder to the original trajectory
                         for model_num in prediction_models:
                             mpnn_binder_pdb = os.path.join(design_paths["MPNN/Binder"], f"{mpnn_design_name}_model{model_num+1}.pdb")
 
                             if os.path.exists(mpnn_binder_pdb):
-                                rmsd_binder = unaligned_rmsd(trajectory_pdb, mpnn_binder_pdb, binder_chain, "A")
+                                rmsd_binder = unaligned_rmsd(trajectory_pdb, mpnn_binder_pdb, binder_chain, "A", use_pyrosetta=use_pyrosetta)
 
                             # append to statistics
                             binder_statistics[model_num+1].update({
@@ -409,12 +486,27 @@ while True:
                                 for prefix in special_prefixes:
                                     if column.startswith(prefix):
                                         base_column = column.split('_', 1)[1]
+                                        break # Corrected: was missing break
 
                                 if base_column not in incremented_columns:
-                                    failure_df[base_column] = failure_df[base_column] + 1
+                                    if base_column in failure_df.columns: # Check if column exists before incrementing
+                                        failure_df[base_column] = failure_df[base_column] + 1
+                                    else:
+                                        # This case should ideally not happen if generate_filter_pass_csv creates all potential base_columns
+                                        print(f"Warning: Base column '{base_column}' not found in {failure_csv}. It won't be incremented for this failure.")
                                     incremented_columns.add(base_column)
-
+                            
                             failure_df.to_csv(failure_csv, index=False)
+
+                            # Log to rejected_mpnn_full_stats.csv
+                            rejected_data_list_for_csv = [mpnn_design_name, mpnn_sequence['seq']]
+                            for filter_col_name in filter_column_names_for_rejected_log:
+                                if filter_col_name in incremented_columns:
+                                    rejected_data_list_for_csv.append(1)
+                                else:
+                                    rejected_data_list_for_csv.append(0)
+                            insert_data(rejected_mpnn_full_stats_csv, rejected_data_list_for_csv)
+                            
                             shutil.copy(best_model_pdb, design_paths["Rejected"])
                         
                         # increase MPNN design number

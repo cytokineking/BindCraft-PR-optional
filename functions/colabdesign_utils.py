@@ -153,6 +153,7 @@ def binder_hallucination(design_name, starting_pdb, chain, target_hotspot_residu
                     print("One-hot trajectory pLDDT good, continuing: "+str(onehot_plddt))
                     if advanced_settings["greedy_iterations"] > 0:
                         print("Stage 4: PSSM Semigreedy Optimisation")
+                        af_model.clear_best()
                         af_model.design_pssm_semigreedy(soft_iters=0, hard_iters=advanced_settings["greedy_iterations"], tries=greedy_tries, models=design_models, 
                                                         num_models=1, sample_models=advanced_settings["sample_models"], ramp_models=False, save_best=True)
 
@@ -235,7 +236,7 @@ def binder_hallucination(design_name, starting_pdb, chain, target_hotspot_residu
     return af_model
 
 # run prediction for binder with masked template target
-def predict_binder_complex(prediction_model, binder_sequence, mpnn_design_name, target_pdb, chain, length, trajectory_pdb, prediction_models, advanced_settings, filters, design_paths, failure_csv, seed=None):
+def predict_binder_complex(prediction_model, binder_sequence, mpnn_design_name, target_pdb, chain, length, trajectory_pdb, prediction_models, advanced_settings, filters, design_paths, failure_csv, seed=None, use_pyrosetta=True):
     prediction_stats = {}
 
     # clean sequence
@@ -244,6 +245,10 @@ def predict_binder_complex(prediction_model, binder_sequence, mpnn_design_name, 
     # reset filtering conditionals
     pass_af2_filters = True
     filter_failures = {}
+
+    if advanced_settings["cyclize_peptide"]:
+        # make macrocycle peptide
+        add_cyclic_offset(prediction_model)
 
     # start prediction per AF2 model, 2 are used by default due to masked templates
     for model_num in prediction_models:
@@ -297,20 +302,24 @@ def predict_binder_complex(prediction_model, binder_sequence, mpnn_design_name, 
         complex_pdb = os.path.join(design_paths["MPNN"], f"{mpnn_design_name}_model{model_num+1}.pdb")
         if pass_af2_filters:
             mpnn_relaxed = os.path.join(design_paths["MPNN/Relaxed"], f"{mpnn_design_name}_model{model_num+1}.pdb")
-            pr_relax(complex_pdb, mpnn_relaxed)
+            pr_relax(complex_pdb, mpnn_relaxed, use_pyrosetta=use_pyrosetta)
         else:
             if os.path.exists(complex_pdb):
                 os.remove(complex_pdb)
 
-    return prediction_stats, pass_af2_filters
+    return prediction_stats, pass_af2_filters, filter_failures
 
 # run prediction for binder alone
-def predict_binder_alone(prediction_model, binder_sequence, mpnn_design_name, length, trajectory_pdb, binder_chain, prediction_models, advanced_settings, design_paths, seed=None):
+def predict_binder_alone(prediction_model, binder_sequence, mpnn_design_name, length, trajectory_pdb, binder_chain, prediction_models, advanced_settings, design_paths, seed=None, use_pyrosetta=True):
     binder_stats = {}
 
     # prepare sequence for prediction
     binder_sequence = re.sub("[^A-Z]", "", binder_sequence.upper())
     prediction_model.set_seq(binder_sequence)
+
+    if advanced_settings["cyclize_peptide"]:
+        # make macrocycle peptide
+        add_cyclic_offset(prediction_model)
 
     # predict each model separately
     for model_num in prediction_models:
@@ -323,7 +332,7 @@ def predict_binder_alone(prediction_model, binder_sequence, mpnn_design_name, le
             prediction_metrics = copy_dict(prediction_model.aux["log"]) # contains plddt, ptm, pae
 
             # align binder model to trajectory binder
-            align_pdbs(trajectory_pdb, binder_alone_pdb, binder_chain, "A")
+            align_pdbs(trajectory_pdb, binder_alone_pdb, binder_chain, "A", use_pyrosetta=use_pyrosetta)
 
             # extract the statistics for the model
             stats = {
@@ -348,7 +357,6 @@ def mpnn_gen_sequence(trajectory_pdb, binder_chain, trajectory_interface_residue
 
     if advanced_settings["mpnn_fix_interface"]:
         fixed_positions = 'A,' + trajectory_interface_residues
-        fixed_positions = fixed_positions.rstrip(",")
         print("Fixing interface residues: "+trajectory_interface_residues)
     else:
         fixed_positions = 'A'
